@@ -2,6 +2,8 @@
 
 An Omarchy bar widget that themes the desktop from your background.
 
+![Accent Picker popup](preview.png)
+
 [matugen](https://github.com/InioX/matugen) finds up to four source colors in an image, but normally only the most dominant one is used. Accent Picker shows all of them in a popup, and the one you click becomes an Omarchy theme: the bar, borders, terminals, btop, editors and everything else Omarchy themes follow it. Your background stays where it is.
 
 The choice is remembered per background. Switch wallpapers and the desktop re-themes with whatever color you picked for that wallpaper last time (or its most dominant color if you never picked one).
