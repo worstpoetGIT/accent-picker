@@ -17,7 +17,7 @@ The choice is remembered per background. Switch wallpapers and the desktop re-th
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/worstpoetGIT/omarchy-accent-picker.git --enable
+omarchy plugin add https://github.com/worstpoetGIT/accent-picker.git --enable
 ```
 
 The palette icon appears on the right side of the bar. Move it with `omarchy bar move worstpoet.accent-picker --section <left|centerBegin|centerEnd|right>`.
