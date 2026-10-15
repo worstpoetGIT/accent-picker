@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "worstpoet.accent-picker",
+  "name": "Accent Picker",
+  "version": "1.0.0",
+  "author": "worstpoetGIT",
+  "license": "MIT",
+  "description": "Theme Omarchy from your background: pick any of the colors matugen finds in the wallpaper, remembered per wallpaper.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Accent Picker",
+    "description": "Pick which color from the current background themes the desktop.",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "mode": "Dark",
+      "followBackground": true
+    },
+    "schema": [
+      { "key": "mode", "type": "enum", "label": "Theme mode", "options": ["Dark", "Light"], "defaultValue": "Dark" },
+      { "key": "followBackground", "type": "boolean", "label": "Follow background changes", "defaultValue": true, "description": "While the accent theme is active, re-theme when the background changes, using the color remembered for that background." }
+    ]
+  }
+}
