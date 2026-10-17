@@ -2,7 +2,9 @@
 
 An Omarchy bar widget that sets your theme's accent color from your background.
 
-![Accent Picker popup](preview.png)
+**Listed on the Omarchy Plugin Marketplace:** [plugins.omarchy.org › Accent Picker](https://plugins.omarchy.org/plugin.html?id=worstpoet.accent-picker)
+
+![Accent Picker on the Omarchy Plugin Marketplace](screenshots/marketplace-listing.png)
 
 [matugen](https://github.com/InioX/matugen) finds up to four source colors in an image. Accent Picker shows them in a popup next to your theme's own accent, and the one you click becomes the accent of the theme you're using. Nothing else about the theme changes, and it stays your active theme.
 
@@ -19,6 +21,10 @@ The pick is remembered per background. When you change wallpapers, the accent fo
 ```bash
 omarchy plugin add https://github.com/worstpoetGIT/accent-picker.git --enable
 ```
+
+Or find it on the [marketplace page](https://plugins.omarchy.org/plugin.html?id=worstpoet.accent-picker), which shows the commit that passed the marketplace's checks:
+
+<img src="screenshots/marketplace-checks.png" width="600" alt="Marketplace verification and listing checks for Accent Picker">
 
 The palette icon appears on the right side of the bar. Move it with `omarchy bar move worstpoet.accent-picker --section <left|centerBegin|centerEnd|right>`.
 
