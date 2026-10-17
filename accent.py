@@ -1,37 +1,43 @@
 #!/usr/bin/env python3
 """Backend for the Accent Picker bar widget.
 
-  accent.py list [dark|light]   JSON: the source colors matugen finds in the
-                                current background, plus which one is active
-  accent.py apply N [dark|light]
-                                build an Omarchy theme from source color N and
-                                switch to it (the background is left alone)
-  accent.py sync [dark|light]   if the accent theme is active and the background
-                                changed since the last apply, re-apply using
-                                the color remembered for the new background
+  accent.py list      JSON: the accent candidates matugen finds in the current
+                      background, and which one (if any) is applied
+  accent.py apply N   set the current theme's accent to candidate N
+  accent.py reset     put the current theme's own accent back
+  accent.py sync      if the current theme has a picked accent and the
+                      background changed since, re-apply using the candidate
+                      remembered for the new background
 
-The pick is remembered per background, so going back to a wallpaper brings
-back the accent chosen for it.
+Only the `accent` key changes. The theme stays the active theme: the override
+is a colors.toml in the theme's user overlay folder
+(~/.config/omarchy/themes/<theme>/), which omarchy-theme-set already layers on
+top of the theme. A colors.toml the user had there is backed up first and
+restored on reset.
 """
 import colorsys
 import fcntl
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
-THEME_NAME = "accent-picker"
-THEME_DIR = f"{HOME}/.config/omarchy/themes/{THEME_NAME}"
 CURRENT = f"{HOME}/.local/state/omarchy/current"
+USER_THEMES = f"{HOME}/.config/omarchy/themes"
 STATE_DIR = f"{HOME}/.local/state/omarchy-accent-picker"
-CHOICES = f"{STATE_DIR}/choices.json"
-LAST = f"{STATE_DIR}/last-applied"
+CHOICES = f"{STATE_DIR}/choices.json"      # background -> candidate index
+OVERRIDES = f"{STATE_DIR}/overrides.json"  # theme -> what reset must undo
+BACKUPS = f"{STATE_DIR}/backups"
 CACHE = f"{HOME}/.cache/omarchy-accent-picker/palette.json"
+MARKER = "# Accent set by the Accent Picker plugin. Reset it from the widget to restore the theme's own accent."
 N_COLORS = 4  # matugen's --source-color-index accepts 0..3
 VIDEO_EXT = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi")
+ACCENT_LINE = re.compile(r'^[ \t]*accent[ \t]*=.*$', re.M)
 
 
 def out(obj):
@@ -46,7 +52,7 @@ def fail(msg):
 def read(path, default=""):
     try:
         with open(path) as f:
-            return f.read().strip()
+            return f.read()
     except OSError:
         return default
 
@@ -67,6 +73,41 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def save_json(path, obj):
+    write_atomic(path, json.dumps(obj, indent=2))
+
+
+def theme_name():
+    name = read(f"{CURRENT}/theme.name").strip()
+    if not name:
+        fail("No Omarchy theme is active")
+    return name
+
+
+def official_colors(name):
+    roots = [os.environ.get("OMARCHY_PATH", ""), "/usr/share/omarchy", f"{HOME}/.local/share/omarchy"]
+    for root in roots:
+        if root and os.path.isfile(f"{root}/themes/{name}/colors.toml"):
+            return read(f"{root}/themes/{name}/colors.toml")
+    return None
+
+
+def accent_of(toml):
+    m = ACCENT_LINE.search(toml or "")
+    if not m:
+        return None
+    v = m.group(0).split("=", 1)[1].strip().strip('"\'')
+    return v if re.fullmatch(r"#[0-9a-fA-F]{6}", v) else None
+
+
+def theme_mode():
+    toml = read(f"{CURRENT}/theme/colors.toml")
+    m = re.search(r'^\s*mode\s*=\s*"?(dark|light)"?', toml, re.M)
+    if m:
+        return m.group(1)
+    return "light" if os.path.exists(f"{CURRENT}/theme/light.mode") else "dark"
+
+
 def background():
     path = os.path.realpath(f"{CURRENT}/background")
     if not os.path.isfile(path):
@@ -83,31 +124,29 @@ def matugen(wall, index, mode):
              "-m", mode, "--source-color-index", str(index)],
             capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
-        fail("matugen is not installed (sudo pacman -S matugen)")
+        fail("matugen is not installed (it's in the Arch extra repository)")
     except subprocess.TimeoutExpired:
         return None
     if r.returncode != 0:
         return None  # index past the number of colors in this image
     try:
-        return json.loads(r.stdout)["colors"]
+        c = json.loads(r.stdout)["colors"]
     except Exception:
         return None
 
-
-def role(colors, name, mode):
-    """matugen 4.x nests each role per mode; older builds return it flat."""
-    c = colors[name]
-    if isinstance(c, str):
-        return c
-    if mode in c:
-        c = c[mode]
-    return c["color"] if isinstance(c, dict) else c
+    def role(name):
+        v = c[name]
+        if isinstance(v, str):
+            return v
+        v = v.get(mode, v)  # matugen 4.x nests per mode; older builds are flat
+        return v["color"] if isinstance(v, dict) else v
+    return {"source": role("source_color"), "accent": role("primary")}
 
 
-def palette(wall, mode):
-    """Every source color's [accent, secondary, tertiary], cached per
-    background + mtime: a matugen pass over a 4K image takes seconds."""
-    key = f"v1:{mode}:{wall}:{os.path.getmtime(wall)}"
+def candidates(wall, mode):
+    """Each source color's accent, cached per background + mtime: a matugen
+    pass over a 4K image takes seconds."""
+    key = f"v2:{mode}:{wall}:{os.path.getmtime(wall)}"
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     with open(CACHE + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -117,32 +156,17 @@ def palette(wall, mode):
                 runs = list(ex.map(lambda i: matugen(wall, i, mode), range(N_COLORS)))
             entries, seen = [], set()
             for i, c in enumerate(runs):
-                if not c:
-                    continue
-                source = role(c, "source_color", mode)
-                if source in seen:
-                    continue
-                seen.add(source)
-                entries.append({"index": i, "source": source,
-                                "accent": role(c, "primary", mode),
-                                "secondary": role(c, "secondary", mode),
-                                "tertiary": role(c, "tertiary", mode)})
+                if c and c["source"] not in seen:
+                    seen.add(c["source"])
+                    entries.append({"index": i, "accent": c["accent"]})
             cache = {key: entries}  # only the current background is worth keeping
             write_atomic(CACHE, json.dumps(cache))
         return cache[key]
 
 
-def hex_to_rgb(h):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
-
-
-def rgb_to_hex(r, g, b):
-    return "#" + "".join(f"{round(max(0, min(1, v)) * 255):02x}" for v in (r, g, b))
-
-
 def hue_name(hexcol):
-    h, _, s = colorsys.rgb_to_hls(*hex_to_rgb(hexcol))
+    r, g, b = (int(hexcol[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    h, _, s = colorsys.rgb_to_hls(r, g, b)
     h *= 360
     if s < 0.12:
         return "Neutral"
@@ -153,114 +177,126 @@ def hue_name(hexcol):
             return name
 
 
-def mix(a, b, t):
-    a, b = hex_to_rgb(a), hex_to_rgb(b)
-    return rgb_to_hex(*(x + (y - x) * t for x, y in zip(a, b)))
+def base_colors(name, record):
+    """The theme's colors.toml as it was before any pick."""
+    if record.get("backup"):
+        return read(record["backup"])
+    return official_colors(name) or read(f"{CURRENT}/theme/colors.toml")
 
 
-def named(hue, accent, mode, bright=False, light=None, sat=None):
-    """A terminal color at a fixed hue, nudged toward the accent's hue so the
-    palette feels related, at a lightness readable on the background."""
-    ah, _, _ = colorsys.rgb_to_hls(*hex_to_rgb(accent))
-    d = ((ah * 360 - hue + 180) % 360) - 180
-    h = ((hue + max(-8, min(8, d * 0.15))) % 360) / 360  # capped: red must stay red
-    if light is None:
-        light = (0.70 if mode == "dark" else 0.42) + (0.07 if bright else 0) * (1 if mode == "dark" else -1)
-    return rgb_to_hex(*colorsys.hls_to_rgb(h, light, sat if sat is not None else (0.72 if bright else 0.62)))
+def retheme(name):
+    env = dict(os.environ, OMARCHY_THEME_SKIP_BACKGROUND="1")
+    r = subprocess.run(["omarchy-theme-set", name], env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        lines = (r.stderr or "").strip().splitlines()
+        fail(lines[-1] if lines else "omarchy-theme-set failed")
 
 
-def colors_toml(c, mode):
-    r = lambda n: role(c, n, mode)
-    accent = r("primary")
-    fg = r("on_surface")
-    fg_var = r("on_surface_variant")
-    keys = {
-        "accent": accent,
-        "selection": r("secondary_container"),
-        "muted": r("outline_variant"),
-        "background": r("surface"),
-        "dark_background": r("surface_container_low"),
-        "darker_background": r("surface_container_lowest"),
-        "lighter_background": r("surface_container_high"),
-        "foreground": fg_var,
-        "dark_foreground": r("outline"),
-        "light_foreground": mix(fg_var, fg, 0.5),
-        "bright_foreground": fg,
-        "red": named(0, accent, mode),
-        "orange": named(25, accent, mode),
-        "yellow": named(45, accent, mode),
-        "green": named(120, accent, mode),
-        "cyan": named(185, accent, mode),
-        "blue": named(215, accent, mode),
-        "magenta": named(290, accent, mode),
-        "brown": named(20, accent, mode, light=0.35 if mode == "dark" else 0.30, sat=0.35),
-        "bright_red": named(0, accent, mode, bright=True),
-        "bright_yellow": named(45, accent, mode, bright=True),
-        "bright_green": named(120, accent, mode, bright=True),
-        "bright_cyan": named(185, accent, mode, bright=True),
-        "bright_blue": named(215, accent, mode, bright=True),
-        "bright_magenta": named(290, accent, mode, bright=True),
-    }
-    lines = ["# Generated by the Accent Picker plugin from the current background.",
-             "# Changes here are overwritten the next time an accent is picked.",
-             f'mode = "{mode}"', ""]
-    lines += [f'{k} = "{v}"' for k, v in keys.items()]
-    return "\n".join(lines) + "\n"
-
-
-def apply(index, mode, wall=None):
+def apply(index, wall=None):
+    name = theme_name()
     wall = wall or background()
-    c = matugen(wall, index, mode)
-    if not c and index != 0:
-        index, c = 0, matugen(wall, 0, mode)  # saved index past this image's colors
-    if not c:
-        fail("matugen could not read the background")
+    user_dir = f"{USER_THEMES}/{name}"
+    if os.path.isdir(f"{user_dir}/.git"):
+        fail(f"{name} was installed from git, so its files are left alone. Try a built-in or your own theme")
 
-    write_atomic(f"{THEME_DIR}/colors.toml", colors_toml(c, mode))
+    mode = theme_mode()
+    entries = {e["index"]: e for e in candidates(wall, mode)}
+    if index not in entries:
+        index = min(entries) if entries else None
+    if index is None:
+        fail("matugen could not read the background")
+    accent = entries[index]["accent"]
+
+    overrides = load_json(OVERRIDES)
+    record = overrides.get(name)
+    target = f"{user_dir}/colors.toml"
+    if record is None:
+        # First pick on this theme: remember what reset has to restore.
+        record = {"createdDir": not os.path.isdir(user_dir), "backup": None}
+        if os.path.isfile(target):
+            os.makedirs(BACKUPS, exist_ok=True)
+            record["backup"] = f"{BACKUPS}/{name}.colors.toml"
+            shutil.copy2(target, record["backup"])
+        overrides[name] = record
+
+    base = base_colors(name, record)
+    if not base.strip():
+        fail(f"Couldn't find the colors for {name}")
+    line = f'accent = "{accent}"'
+    if ACCENT_LINE.search(base):
+        body = ACCENT_LINE.sub(line, base, count=1)
+    else:
+        body = base.rstrip("\n") + f"\n{line}\n"
+    write_atomic(target, f"{MARKER}\n{body}")
+
+    record["wallpaper"] = wall
+    save_json(OVERRIDES, overrides)
     choices = load_json(CHOICES)
     choices[wall] = index
-    write_atomic(CHOICES, json.dumps(choices, indent=2))
-    write_atomic(LAST, f"{wall}\n{mode}\n")
+    save_json(CHOICES, choices)
 
-    env = dict(os.environ, OMARCHY_THEME_SKIP_BACKGROUND="1")
-    r = subprocess.run(["omarchy-theme-set", THEME_NAME], env=env,
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        fail((r.stderr or "omarchy-theme-set failed").strip().splitlines()[-1])
-    out({"ok": True, "index": index, "accent": role(c, "primary", mode)})
+    retheme(name)
+    out({"ok": True, "index": index, "accent": accent})
+
+
+def reset():
+    name = theme_name()
+    overrides = load_json(OVERRIDES)
+    record = overrides.pop(name, None)
+    if record is None:
+        out({"ok": True, "skipped": "no accent picked for this theme"})
+        return
+    user_dir = f"{USER_THEMES}/{name}"
+    target = f"{user_dir}/colors.toml"
+    if record.get("backup") and os.path.isfile(record["backup"]):
+        shutil.copy2(record["backup"], target)
+        os.remove(record["backup"])
+    elif read(target).startswith(MARKER):
+        os.remove(target)
+    if record.get("createdDir"):
+        try:
+            os.rmdir(user_dir)  # only if nothing else was put there since
+        except OSError:
+            pass
+    save_json(OVERRIDES, overrides)
+    retheme(name)
+    out({"ok": True, "index": None})
 
 
 def main():
     args = sys.argv[1:]
-    if not args:
-        print(__doc__.strip())
-        sys.exit(2)
-    cmd = args[0]
-    mode = next((a for a in args[1:] if a in ("dark", "light")), "dark")
+    cmd = args[0] if args else ""
     os.makedirs(STATE_DIR, exist_ok=True)
 
     if cmd == "list":
+        name = theme_name()
         wall = background()
-        active_theme = read(f"{CURRENT}/theme.name") == THEME_NAME
-        saved = load_json(CHOICES).get(wall)
-        entries = palette(wall, mode)
+        mode = theme_mode()
+        record = load_json(OVERRIDES).get(name)
+        entries = candidates(wall, mode)
         for e in entries:
             e["name"] = hue_name(e["accent"])
-        out({"ok": True, "background": wall, "themeActive": active_theme,
-             "active": saved if active_theme else None, "colors": entries})
+        active = load_json(CHOICES).get(wall) if record and record.get("wallpaper") == wall else None
+        out({"ok": True, "theme": name, "mode": mode, "background": wall,
+             "themeAccent": accent_of(base_colors(name, record or {})),
+             "active": active, "colors": entries})
 
     elif cmd == "apply" and len(args) > 1 and args[1].isdigit():
-        apply(int(args[1]), mode)
+        apply(int(args[1]))
+
+    elif cmd == "reset":
+        reset()
 
     elif cmd == "sync":
-        if read(f"{CURRENT}/theme.name") != THEME_NAME:
-            out({"ok": True, "skipped": "theme not active"})
+        record = load_json(OVERRIDES).get(theme_name())
+        if not record:
+            out({"ok": True, "skipped": "no accent picked for this theme"})
             return
         wall = background()
-        if read(LAST).splitlines()[:1] == [wall]:
+        if record.get("wallpaper") == wall:
             out({"ok": True, "skipped": "unchanged"})
             return
-        apply(int(load_json(CHOICES).get(wall, 0)), mode, wall)
+        apply(int(load_json(CHOICES).get(wall, 0)), wall)
 
     else:
         print(__doc__.strip())

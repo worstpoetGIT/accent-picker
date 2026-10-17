@@ -1,17 +1,17 @@
 # Accent Picker
 
-An Omarchy bar widget that themes the desktop from your background.
+An Omarchy bar widget that sets your theme's accent color from your background.
 
 ![Accent Picker popup](preview.png)
 
-[matugen](https://github.com/InioX/matugen) finds up to four source colors in an image, but normally only the most dominant one is used. Accent Picker shows all of them in a popup, and the one you click becomes an Omarchy theme: the bar, borders, terminals, btop, editors and everything else Omarchy themes follow it. Your background stays where it is.
+[matugen](https://github.com/InioX/matugen) finds up to four source colors in an image. Accent Picker shows them in a popup next to your theme's own accent, and the one you click becomes the accent of the theme you're using. Nothing else about the theme changes, and it stays your active theme.
 
-The choice is remembered per background. Switch wallpapers and the desktop re-themes with whatever color you picked for that wallpaper last time (or its most dominant color if you never picked one).
+The pick is remembered per background. When you change wallpapers, the accent follows: it uses whatever color you picked for that wallpaper last time, or its most dominant color if you never picked one.
 
 ## Requirements
 
 - Omarchy with the Quickshell shell (Quattro)
-- matugen: `sudo pacman -S matugen`
+- matugen, from the Arch `extra` repository
 - A still-image background (video backgrounds are skipped)
 
 ## Install
@@ -24,9 +24,9 @@ The palette icon appears on the right side of the bar. Move it with `omarchy bar
 
 ## Use
 
-Click the icon, then click a color, or use the arrow keys and Enter. The first open on a new background takes a second or two while matugen reads the image; after that it's cached.
+Click the icon, then click a color, or use the arrow keys and Enter. **Theme default** puts the theme's own accent back. The first open on a new background takes a second or two while matugen reads the image; after that it's cached.
 
-Picking a color switches you to a theme named `accent-picker`. To go back to a regular theme, pick one from the theme switcher as usual; your accent choices stay saved for next time.
+Each theme keeps its own pick, so switching themes shows that theme's accent, picked or not.
 
 ## Settings
 
@@ -34,25 +34,29 @@ Set from **Setup › Plugins** or `omarchy bar set`:
 
 | Setting | Default | What it does |
 |---|---|---|
-| Theme mode | Dark | Build a dark or light theme from the color |
-| Follow background changes | On | While `accent-picker` is the active theme, re-theme when the background changes |
+| Follow background changes | On | When an accent is picked, update it when the background changes |
 
-## How it works
+## What it changes on disk
 
-- `Panel.qml`: the bar button and popup.
-- `accent.py`: runs matugen on the current background (`~/.local/state/omarchy/current/background`), writes `~/.config/omarchy/themes/accent-picker/colors.toml` from the Material You roles, and runs `omarchy-theme-set accent-picker` with `OMARCHY_THEME_SKIP_BACKGROUND=1`. Omarchy's own templates generate every app's config from that `colors.toml`.
-- Named terminal colors (red, green, …) are generated at fixed hues, nudged slightly toward the accent, at a lightness that reads on the background.
+Only when you click a color, and only for the current theme:
 
-State lives in `~/.local/state/omarchy-accent-picker/` (choices per background) and `~/.cache/omarchy-accent-picker/` (palette cache).
+- It writes `~/.config/omarchy/themes/<theme>/colors.toml`, Omarchy's normal per-theme override file. The file is the theme's own `colors.toml` with the `accent` line changed, and a comment at the top saying the plugin wrote it. Omarchy layers that folder over the theme when it applies it.
+- If you already had your own `colors.toml` there, it's backed up first, and the accent is changed inside your colors.
+- Then it reapplies the same theme with `omarchy-theme-set`, keeping your background.
+
+**Theme default** undoes all of this: it deletes the file the plugin wrote (or restores your backup) and reapplies the theme. Themes installed from git are left alone, since changing their files would conflict with `omarchy theme update`.
+
+Plugin state lives in `~/.local/state/omarchy-accent-picker/` (picks per background, backups) and `~/.cache/omarchy-accent-picker/` (palette cache).
 
 ## Uninstall
 
+Choose **Theme default** on each theme you picked an accent for, then:
+
 ```bash
 omarchy plugin remove worstpoet.accent-picker
-rm -rf ~/.config/omarchy/themes/accent-picker ~/.local/state/omarchy-accent-picker ~/.cache/omarchy-accent-picker
 ```
 
-Switch to another theme first if `accent-picker` is active.
+You can then delete `~/.local/state/omarchy-accent-picker` and `~/.cache/omarchy-accent-picker`.
 
 ## License
 

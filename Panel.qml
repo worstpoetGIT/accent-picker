@@ -5,23 +5,25 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Bar button + popup listing the source colors matugen finds in the current
-// background. Picking one builds the "accent-picker" Omarchy theme from it
-// (accent.py) and switches to it without touching the background. While that
-// theme is active, a background change re-applies the color remembered for
-// the new background.
+// Bar button + popup listing accent colors matugen finds in the current
+// background. Picking one changes only the current theme's accent
+// (accent.py); "Theme default" puts the theme's own accent back. While a
+// picked accent is in place, a background change re-applies the color
+// remembered for the new background.
 Panel {
   id: root
   moduleName: "worstpoet.accent-picker"
   ipcTarget: "worstpoet.accent-picker"
 
   readonly property string script: decodeURIComponent(String(Qt.resolvedUrl("accent.py")).replace(/^file:\/\//, ""))
-  readonly property string mode: setting("mode", "Dark") === "Light" ? "light" : "dark"
   readonly property color fg: root.bar ? root.bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
 
+  // Row 0 is "Theme default"; rows 1.. are the background's candidates.
   property var colors: []
   property var activeIndex: null
+  property string themeName: ""
+  property string themeAccent: ""
   property string error: ""
   property bool loading: false
   property bool applying: false
@@ -29,11 +31,13 @@ Panel {
   property bool cursorActive: false
   property string lastBackground: ""
 
+  readonly property var rows: [{ index: -1, name: "Theme default", accent: root.themeAccent }].concat(root.colors)
+
   function refresh() {
     if (listProc.running) return
     root.loading = root.colors.length === 0
     root.error = ""
-    listProc.command = ["python3", root.script, "list", root.mode]
+    listProc.command = ["python3", root.script, "list"]
     listProc.running = true
   }
 
@@ -41,13 +45,14 @@ Panel {
     if (applyProc.running) return
     root.applying = true
     root.error = ""
-    applyProc.command = ["python3", root.script, "apply", String(index), root.mode]
+    applyProc.command = index < 0
+      ? ["python3", root.script, "reset"]
+      : ["python3", root.script, "apply", String(index)]
     applyProc.running = true
   }
 
   function moveCursor(delta) {
-    if (root.colors.length === 0) return
-    root.cursor = (root.cursor + delta + root.colors.length) % root.colors.length
+    root.cursor = (root.cursor + delta + root.rows.length) % root.rows.length
   }
 
   function parse(raw) {
@@ -67,12 +72,15 @@ Panel {
       onStreamFinished: {
         var r = root.parse(text)
         root.loading = false
-        if (!r) { root.error = "Couldn't read the palette"; return }
+        if (!r) { root.error = "Couldn't read the colors"; return }
         if (!r.ok) { root.error = r.error; root.colors = []; return }
         root.colors = r.colors
         root.activeIndex = r.active
+        root.themeName = r.theme
+        root.themeAccent = r.themeAccent || ""
+        root.cursor = 0
         for (var i = 0; i < r.colors.length; i++)
-          if (r.colors[i].index === r.active) root.cursor = i
+          if (r.colors[i].index === r.active) root.cursor = i + 1
       }
     }
   }
@@ -84,7 +92,7 @@ Panel {
       onStreamFinished: {
         var r = root.parse(text)
         if (r && r.ok) root.activeIndex = r.index
-        else root.error = r ? r.error : "Couldn't apply the accent"
+        else root.error = r ? r.error : "Couldn't change the accent"
       }
     }
     onExited: root.applying = false
@@ -111,7 +119,7 @@ Panel {
 
   Process {
     id: syncProc
-    command: ["python3", root.script, "sync", root.mode]
+    command: ["python3", root.script, "sync"]
   }
 
   Timer {
@@ -141,7 +149,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent
-    contentWidth: panel.fittedContentWidth(Style.space(320))
+    contentWidth: panel.fittedContentWidth(Style.space(300))
     contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
     content: PanelKeyCatcher {
@@ -152,7 +160,7 @@ Panel {
         root.moveCursor(dx !== 0 ? dx : dy)
       }
       onActivateRequested: {
-        if (root.cursorActive && root.colors.length > 0) root.pick(root.colors[root.cursor].index)
+        if (root.cursorActive && root.colors.length > 0) root.pick(root.rows[root.cursor].index)
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -162,10 +170,10 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        spacing: Style.space(12)
+        spacing: Style.space(10)
 
         PanelSectionHeader {
-          text: "Accent from background"
+          text: root.themeName !== "" ? "Accent for " + root.themeName : "Accent color"
           foreground: root.fg
           fontFamily: root.fontFamily
         }
@@ -185,44 +193,39 @@ Panel {
         }
 
         Repeater {
-          model: root.colors
+          model: root.colors.length > 0 ? root.rows : []
 
           Rectangle {
             id: row
             required property var modelData
             required property int index
-            readonly property bool active: root.activeIndex === modelData.index
+            readonly property bool isDefault: modelData.index < 0
+            readonly property bool active: isDefault ? root.activeIndex === null : root.activeIndex === modelData.index
             readonly property bool hasCursor: (root.cursorActive && root.cursor === index) || mouse.containsMouse
 
             width: column.width
-            height: Style.space(44)
+            height: Style.space(40)
             radius: Style.cornerRadius
             color: hasCursor ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08) : "transparent"
             border.width: active ? Math.max(1, Style.space(2)) : 0
-            border.color: modelData.accent
+            border.color: modelData.accent || root.fg
 
-            Row {
+            Rectangle {
+              id: swatch
               anchors.left: parent.left
               anchors.leftMargin: Style.space(10)
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              Repeater {
-                model: [row.modelData.accent, row.modelData.secondary, row.modelData.tertiary]
-                Rectangle {
-                  required property var modelData
-                  required property int index
-                  width: index === 0 ? Style.space(28) : Style.space(14)
-                  height: Style.space(28)
-                  radius: Style.space(6)
-                  color: modelData
-                }
-              }
+              width: Style.space(24)
+              height: width
+              radius: width / 2
+              color: row.modelData.accent || "transparent"
+              border.width: row.isDefault ? 1 : 0
+              border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.4)
             }
 
             Text {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(84)
+              anchors.left: swatch.right
+              anchors.leftMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: row.modelData.name
@@ -237,7 +240,7 @@ Panel {
               anchors.rightMargin: Style.space(10)
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: row.active ? "✓" : row.modelData.accent
+              text: row.active ? "✓" : (row.modelData.accent || "")
               color: root.fg
               opacity: row.active ? 1 : 0.5
               font.family: root.fontFamily
